@@ -137,6 +137,15 @@ static unsigned int ds4_mac1 = 0;
 
 static struct ds4_input_report ds4_input;
 
+enum{
+	SPACE_KERNEL,
+	SPACE_USER,
+	LOGIC_POSITIVE,
+	LOGIC_NEGATIVE,
+	TRIGGERS_EXT,
+	TRIGGERS_NONEXT
+};
+
 static void ds4_input_reset()
 {
 	memset(&ds4_input, 0, sizeof(ds4_input));
@@ -256,7 +265,7 @@ DECL_FUNC_HOOK(SceCtrl_sceCtrlGetBatteryInfo, int port, SceUInt8 *batt)
 	return ret;
 }
 
-static void patch_ctrl_data(const struct ds4_input_report *ds4, SceCtrlData *pad_data)
+static void patch_ctrl_data(const struct ds4_input_report *ds4, SceCtrlData *pad_data, int port, int logic, int triggers)
 {
 	signed char ldx, ldy, rdx, rdy;
 	unsigned int buttons = 0;
@@ -281,20 +290,36 @@ static void patch_ctrl_data(const struct ds4_input_report *ds4, SceCtrlData *pad
 	if (ds4->dpad == 5 || ds4->dpad == 6 || ds4->dpad == 7)
 		buttons |= SCE_CTRL_LEFT;
 
-	if (ds4->l1)
-		buttons |= SCE_CTRL_LTRIGGER;
-	if (ds4->r1)
-		buttons |= SCE_CTRL_RTRIGGER;
+	if (triggers == TRIGGERS_EXT){
+		if (ds4->l1)
+			buttons |= SCE_CTRL_L1;
+		if (ds4->r1)
+			buttons |= SCE_CTRL_R1;
 
-	if (ds4->l2)
-		buttons |= SCE_CTRL_L1;
-	if (ds4->r2)
-		buttons |= SCE_CTRL_R1;
+		if (ds4->l2)
+			buttons |= SCE_CTRL_LTRIGGER;
+		if (ds4->r2)
+			buttons |= SCE_CTRL_RTRIGGER;
 
-	if (ds4->l3)
-		buttons |= SCE_CTRL_L3;
-	if (ds4->r3)
-		buttons |= SCE_CTRL_R3;
+		if (ds4->l3)
+			buttons |= SCE_CTRL_L3;
+		if (ds4->r3)
+			buttons |= SCE_CTRL_R3;
+
+		if (port == 1){
+			if (ds4->l_trigger > DS4_TRIGGER_THRESHOLD)
+				pad_data->lt = ds4->l_trigger;
+
+			if (ds4->r_trigger > DS4_TRIGGER_THRESHOLD)
+				pad_data->rt = ds4->r_trigger;
+		}
+
+	} else {
+		if (ds4->l1)
+			buttons |= SCE_CTRL_LTRIGGER;
+		if (ds4->r1)
+			buttons |= SCE_CTRL_RTRIGGER;
+	}
 
 	if (ds4->share)
 		buttons |= SCE_CTRL_SELECT;
@@ -322,12 +347,6 @@ static void patch_ctrl_data(const struct ds4_input_report *ds4, SceCtrlData *pad
 		pad_data->ry = ds4->right_y;
 	}
 
-	if (ds4->l_trigger > DS4_TRIGGER_THRESHOLD)
-		pad_data->lt = ds4->l_trigger;
-
-	if (ds4->r_trigger > DS4_TRIGGER_THRESHOLD)
-		pad_data->rt = ds4->r_trigger;
-
 	if (ds4->ps)
 		ksceCtrlSetButtonEmulation(0, 0, 0, SCE_CTRL_INTERCEPTED, 16);
 
@@ -336,55 +355,83 @@ static void patch_ctrl_data(const struct ds4_input_report *ds4, SceCtrlData *pad
 	    ds4->r_trigger > DS4_TRIGGER_THRESHOLD)
 		ksceKernelPowerTick(0);
 
+	if (logic == LOGIC_NEGATIVE)
+		pad_data->buttons = 0xFFFFFFFF - pad_data->buttons;
+	if (port == 1)
+		pad_data->buttons = 0;
+
 	pad_data->buttons |= buttons;
+	
+	if (logic == LOGIC_NEGATIVE)
+		pad_data->buttons = 0xFFFFFFFF - pad_data->buttons;
 }
 
-static void patch_ctrl_data_all_user(const struct ds4_input_report *ds4,
-				     int port, SceCtrlData *pad_data, int count)
+static void patch_ctrl_data_all(const struct ds4_input_report *ds4,
+				     int port, SceCtrlData *pad_data, int count,
+					 int space, int logic, int triggers)
 {
 	unsigned int i;
 
 	for (i = 0; i < count; i++) {
-		SceCtrlData k_data;
-
-		ksceKernelMemcpyUserToKernel(&k_data, (uintptr_t)pad_data, sizeof(k_data));
-		patch_ctrl_data(ds4, &k_data);
-		ksceKernelMemcpyKernelToUser((uintptr_t)pad_data, &k_data, sizeof(k_data));
+		if (space == SPACE_USER){
+			SceCtrlData k_data;
+			ksceKernelMemcpyUserToKernel(&k_data, (uintptr_t)pad_data, sizeof(k_data));
+			// if (logic == LOGIC_NEGATIVE)
+			// 	k_data.buttons = 0xFFFFFFFF - k_data.buttons;
+			// if (port == 1)
+			// 	k_data.buttons = 0;
+			patch_ctrl_data(ds4, &k_data, port, logic, triggers);
+			// if (logic == LOGIC_NEGATIVE)
+			// 	k_data.buttons = 0xFFFFFFFF - k_data.buttons;
+			ksceKernelMemcpyKernelToUser((uintptr_t)pad_data, &k_data, sizeof(k_data));
+		} else {
+			// if (logic == LOGIC_NEGATIVE)
+			// 	pad_data->buttons = 0xFFFFFFFF - pad_data->buttons;
+			// if (port == 1)
+			// 	pad_data->buttons = 0;
+			patch_ctrl_data(ds4, pad_data, port, logic, triggers);
+			// if (logic == LOGIC_NEGATIVE)
+			// 	pad_data->buttons = 0xFFFFFFFF - pad_data->buttons;
+		}
 
 		pad_data++;
 	}
 }
 
-static void patch_ctrl_data_all_kernel(const struct ds4_input_report *ds4,
-				       int port, SceCtrlData *pad_data, int count)
-{
-	unsigned int i;
-
-	for (i = 0; i < count; i++, pad_data++)
-		patch_ctrl_data(ds4, pad_data);
-}
-
-#define DECL_FUNC_HOOK_PATCH_CTRL(type, name) \
+#define DECL_FUNC_HOOK_PATCH_CTRL(name, space, logic, triggers) \
 	DECL_FUNC_HOOK(SceCtrl_##name, int port, SceCtrlData *pad_data, int count) \
 	{ \
-		int ret = TAI_CONTINUE(int, SceCtrl_ ##name##_ref, port, pad_data, count); \
-		if (ret >= 0 && ds4_connected) \
-			patch_ctrl_data_all_##type(&ds4_input, port, pad_data, count); \
+		int ret; \
+		if (ds4_connected && port == 1){ \
+			ret = TAI_CONTINUE(int, SceCtrl_ ##name##_ref, 0, pad_data, count); \
+		} else { \
+			ret = TAI_CONTINUE(int, SceCtrl_ ##name##_ref, port, pad_data, count); \
+		} \
+		if (ret >= 0 && ret < 64 && ds4_connected) \
+			patch_ctrl_data_all(&ds4_input, port, pad_data, count, (space), (logic), (triggers)); \
 		return ret; \
 	}
 
-DECL_FUNC_HOOK_PATCH_CTRL(kernel, ksceCtrlPeekBufferNegative)
-DECL_FUNC_HOOK_PATCH_CTRL(user, sceCtrlPeekBufferNegative2)
-DECL_FUNC_HOOK_PATCH_CTRL(kernel, ksceCtrlPeekBufferPositive)
-DECL_FUNC_HOOK_PATCH_CTRL(user, sceCtrlPeekBufferPositive2)
-DECL_FUNC_HOOK_PATCH_CTRL(user, sceCtrlPeekBufferPositiveExt)
-DECL_FUNC_HOOK_PATCH_CTRL(user, sceCtrlPeekBufferPositiveExt2)
-DECL_FUNC_HOOK_PATCH_CTRL(kernel, ksceCtrlReadBufferNegative)
-DECL_FUNC_HOOK_PATCH_CTRL(user, sceCtrlReadBufferNegative2)
-DECL_FUNC_HOOK_PATCH_CTRL(kernel, ksceCtrlReadBufferPositive)
-DECL_FUNC_HOOK_PATCH_CTRL(user, sceCtrlReadBufferPositive2)
-DECL_FUNC_HOOK_PATCH_CTRL(user, sceCtrlReadBufferPositiveExt)
-DECL_FUNC_HOOK_PATCH_CTRL(user, sceCtrlReadBufferPositiveExt2)
+// DECL_FUNC_HOOK_PATCH_CTRL(sceCtrlPeekBufferPositive,     SPACE_USER,   LOGIC_POSITIVE, TRIGGERS_NONEXT)
+// DECL_FUNC_HOOK_PATCH_CTRL(sceCtrlReadBufferPositive,     SPACE_USER,   LOGIC_POSITIVE, TRIGGERS_NONEXT)
+DECL_FUNC_HOOK_PATCH_CTRL(sceCtrlPeekBufferPositiveExt,  SPACE_USER,   LOGIC_POSITIVE, TRIGGERS_NONEXT)
+DECL_FUNC_HOOK_PATCH_CTRL(sceCtrlReadBufferPositiveExt,  SPACE_USER,   LOGIC_POSITIVE, TRIGGERS_NONEXT)
+
+// DECL_FUNC_HOOK_PATCH_CTRL(sceCtrlPeekBufferNegative,     SPACE_USER,   LOGIC_NEGATIVE, TRIGGERS_NONEXT)
+// DECL_FUNC_HOOK_PATCH_CTRL(sceCtrlReadBufferNegative,     SPACE_USER,   LOGIC_NEGATIVE, TRIGGERS_NONEXT)
+
+DECL_FUNC_HOOK_PATCH_CTRL(sceCtrlPeekBufferPositive2,    SPACE_USER,   LOGIC_POSITIVE, TRIGGERS_EXT)
+DECL_FUNC_HOOK_PATCH_CTRL(sceCtrlReadBufferPositive2,    SPACE_USER,   LOGIC_POSITIVE, TRIGGERS_EXT)
+DECL_FUNC_HOOK_PATCH_CTRL(sceCtrlPeekBufferPositiveExt2, SPACE_USER,   LOGIC_POSITIVE, TRIGGERS_EXT)
+DECL_FUNC_HOOK_PATCH_CTRL(sceCtrlReadBufferPositiveExt2, SPACE_USER,   LOGIC_POSITIVE, TRIGGERS_EXT)
+
+DECL_FUNC_HOOK_PATCH_CTRL(sceCtrlPeekBufferNegative2,    SPACE_USER,   LOGIC_NEGATIVE, TRIGGERS_EXT)
+DECL_FUNC_HOOK_PATCH_CTRL(sceCtrlReadBufferNegative2,    SPACE_USER,   LOGIC_NEGATIVE, TRIGGERS_EXT)
+
+DECL_FUNC_HOOK_PATCH_CTRL(ksceCtrlPeekBufferPositive,    SPACE_KERNEL, LOGIC_POSITIVE, TRIGGERS_NONEXT)
+DECL_FUNC_HOOK_PATCH_CTRL(ksceCtrlReadBufferPositive,    SPACE_KERNEL, LOGIC_POSITIVE, TRIGGERS_NONEXT)
+DECL_FUNC_HOOK_PATCH_CTRL(ksceCtrlPeekBufferNegative,    SPACE_KERNEL, LOGIC_NEGATIVE, TRIGGERS_NONEXT)
+DECL_FUNC_HOOK_PATCH_CTRL(ksceCtrlReadBufferNegative,    SPACE_KERNEL, LOGIC_NEGATIVE, TRIGGERS_NONEXT)
 
 static void patch_touch_data(SceUInt32 port, SceTouchData *pData, SceUInt32 nBufs,
 			    struct ds4_input_report *ds4)
@@ -711,54 +758,49 @@ int module_start(SceSize argc, const void *args)
 		"SceCtrl", TAI_ANY_LIBRARY, 0x8F9B1CE5);
 
 	/* SceCtrl hooks:
-	 * sceCtrlPeekBufferNegative -> ksceCtrlPeekBufferNegative
-	 * sceCtrlPeekBufferNegative2 -> none
 	 * sceCtrlPeekBufferPositive -> ksceCtrlPeekBufferPositive
-	 * sceCtrlPeekBufferPositive2 -> none
-	 * sceCtrlPeekBufferPositiveExt -> none
-	 * sceCtrlPeekBufferPositiveExt2 -> none
-	 * sceCtrlReadBufferNegative -> ksceCtrlReadBufferNegative
-	 * sceCtrlReadBufferNegative2 -> none
 	 * sceCtrlReadBufferPositive -> ksceCtrlReadBufferPositive
-	 * sceCtrlReadBufferPositive2 -> none
+	 * sceCtrlPeekBufferPositiveExt -> none
 	 * sceCtrlReadBufferPositiveExt -> none
+	 * 
+	 * sceCtrlPeekBufferNegative -> ksceCtrlPeekBufferNegative
+	 * sceCtrlReadBufferNegative -> ksceCtrlReadBufferNegative
+	 * 
+	 * sceCtrlPeekBufferNegative2 -> none
+	 * sceCtrlPeekBufferPositive2 -> none
+	 * sceCtrlPeekBufferPositiveExt2 -> none
+	 * sceCtrlReadBufferNegative2 -> none
+	 * sceCtrlReadBufferPositive2 -> none
 	 * sceCtrlReadBufferPositiveExt2 -> none
 	 */
-	BIND_FUNC_EXPORT_HOOK(SceCtrl_ksceCtrlPeekBufferNegative, KERNEL_PID,
-		"SceCtrl", TAI_ANY_LIBRARY, 0x19895843);
-
-	BIND_FUNC_EXPORT_HOOK(SceCtrl_sceCtrlPeekBufferNegative2, KERNEL_PID,
-		"SceCtrl", TAI_ANY_LIBRARY, 0x81A89660);
-
-	BIND_FUNC_EXPORT_HOOK(SceCtrl_ksceCtrlPeekBufferPositive, KERNEL_PID,
-		"SceCtrl", TAI_ANY_LIBRARY, 0xEA1D3A34);
-
-	BIND_FUNC_EXPORT_HOOK(SceCtrl_sceCtrlPeekBufferPositive2, KERNEL_PID,
-		"SceCtrl", TAI_ANY_LIBRARY, 0x15F81E8C);
 
 	BIND_FUNC_EXPORT_HOOK(SceCtrl_sceCtrlPeekBufferPositiveExt, KERNEL_PID,
 		"SceCtrl", TAI_ANY_LIBRARY, 0xA59454D3);
-
-	BIND_FUNC_EXPORT_HOOK(SceCtrl_sceCtrlPeekBufferPositiveExt2, KERNEL_PID,
-		"SceCtrl", TAI_ANY_LIBRARY, 0x860BF292);
-
-	BIND_FUNC_EXPORT_HOOK(SceCtrl_ksceCtrlReadBufferNegative, KERNEL_PID,
-		"SceCtrl", TAI_ANY_LIBRARY, 0x8D4E0DD1);
-
-	BIND_FUNC_EXPORT_HOOK(SceCtrl_sceCtrlReadBufferNegative2, KERNEL_PID,
-		"SceCtrl", TAI_ANY_LIBRARY, 0x27A0C5FB);
-
-	BIND_FUNC_EXPORT_HOOK(SceCtrl_ksceCtrlReadBufferPositive, KERNEL_PID,
-		"SceCtrl", TAI_ANY_LIBRARY, 0x9B96A1AA);
-
-	BIND_FUNC_EXPORT_HOOK(SceCtrl_sceCtrlReadBufferPositive2, KERNEL_PID,
-		"SceCtrl", TAI_ANY_LIBRARY, 0xC4226A3E);
-
 	BIND_FUNC_EXPORT_HOOK(SceCtrl_sceCtrlReadBufferPositiveExt, KERNEL_PID,
 		"SceCtrl", TAI_ANY_LIBRARY, 0xE2D99296);
 
+	BIND_FUNC_EXPORT_HOOK(SceCtrl_sceCtrlPeekBufferPositive2, KERNEL_PID,
+		"SceCtrl", TAI_ANY_LIBRARY, 0x15F81E8C);
+	BIND_FUNC_EXPORT_HOOK(SceCtrl_sceCtrlReadBufferPositive2, KERNEL_PID,
+		"SceCtrl", TAI_ANY_LIBRARY, 0xC4226A3E);
+	BIND_FUNC_EXPORT_HOOK(SceCtrl_sceCtrlPeekBufferPositiveExt2, KERNEL_PID,
+		"SceCtrl", TAI_ANY_LIBRARY, 0x860BF292);
 	BIND_FUNC_EXPORT_HOOK(SceCtrl_sceCtrlReadBufferPositiveExt2, KERNEL_PID,
 		"SceCtrl", TAI_ANY_LIBRARY, 0xA7178860);
+
+	BIND_FUNC_EXPORT_HOOK(SceCtrl_sceCtrlPeekBufferNegative2, KERNEL_PID,
+		"SceCtrl", TAI_ANY_LIBRARY, 0x81A89660);
+	BIND_FUNC_EXPORT_HOOK(SceCtrl_sceCtrlReadBufferNegative2, KERNEL_PID,
+		"SceCtrl", TAI_ANY_LIBRARY, 0x27A0C5FB);
+
+	BIND_FUNC_EXPORT_HOOK(SceCtrl_ksceCtrlPeekBufferPositive, KERNEL_PID,
+		"SceCtrl", TAI_ANY_LIBRARY, 0xEA1D3A34);
+	BIND_FUNC_EXPORT_HOOK(SceCtrl_ksceCtrlReadBufferPositive, KERNEL_PID,
+		"SceCtrl", TAI_ANY_LIBRARY, 0x9B96A1AA);
+	BIND_FUNC_EXPORT_HOOK(SceCtrl_ksceCtrlPeekBufferNegative, KERNEL_PID,
+		"SceCtrl", TAI_ANY_LIBRARY, 0x19895843);
+	BIND_FUNC_EXPORT_HOOK(SceCtrl_ksceCtrlReadBufferNegative, KERNEL_PID,
+		"SceCtrl", TAI_ANY_LIBRARY, 0x8D4E0DD1);
 
 	/* SceTouch hooks */
 	BIND_FUNC_EXPORT_HOOK(SceTouch_ksceTouchPeek, KERNEL_PID,
