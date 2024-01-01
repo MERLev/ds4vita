@@ -36,6 +36,9 @@ int __errno;
 #define DS5_VID 0x054C
 #define DS5_PID 0x0CE6
 
+#define DSE5_VID 0x054C
+#define DSE5_PID 0x0DF2
+
 #define DS5_TOUCHPAD_W 1920
 #define DS5_TOUCHPAD_H 1070
 #define DS5_TOUCHPAD_W_DEAD 60
@@ -403,7 +406,7 @@ static int is_ds4(const unsigned short vid_pid[2])
 
 static int is_ds5(const unsigned short vid_pid[2])
 {
-	return vid_pid[0] == DS5_VID && vid_pid[1] == DS5_PID;
+	return (vid_pid[0] == DS5_VID && vid_pid[1] == DS5_PID) || (vid_pid[0] == DSE5_VID && vid_pid[1] == DSE5_PID);
 }
 
 static inline void *mempool_alloc(unsigned int size)
